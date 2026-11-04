@@ -186,6 +186,20 @@ def apply_award(row: dict, it: dict, today: str) -> None:
     })
 
 
+def close_of(row: dict, now: datetime) -> datetime:
+    """입찰 마감일시. 비어 있으면 최초 등록 후 2주를 마감으로 간주."""
+    close = parse_dt(row.get("마감일시", ""))
+    if close is None:
+        first = parse_dt(row.get("최초등록일", "")) or now
+        close = first + timedelta(days=14)
+    return close
+
+
+def is_closed(row: dict, now: datetime) -> bool:
+    """마감일이 지난 공고만 낙찰 분석 대상."""
+    return now >= close_of(row, now)
+
+
 def refresh(tracking: dict[str, dict], key: str, fetch=lookup) -> dict:
     now = kst_now()
     today = now.strftime("%Y-%m-%d")
@@ -193,12 +207,8 @@ def refresh(tracking: dict[str, dict], key: str, fetch=lookup) -> dict:
     for row in tracking.values():
         if row.get("상태") not in ("대기", "결과대기"):
             continue
-        close = parse_dt(row.get("마감일시", ""))
-        if close is None:
-            # 마감일이 없으면 최초 등록 후 2주 뒤부터 조회
-            first = parse_dt(row.get("최초등록일", "")) or now
-            close = first + timedelta(days=14)
-        if now < close + timedelta(days=WAIT_AFTER_CLOSE_DAYS):
+        close = close_of(row, now)
+        if now.date() < (close + timedelta(days=WAIT_AFTER_CLOSE_DAYS)).date():   # 날짜 기준
             continue
         if now > close + timedelta(days=GIVE_UP_DAYS):
             row["상태"] = "확인불가"
@@ -226,13 +236,19 @@ def refresh(tracking: dict[str, dict], key: str, fetch=lookup) -> dict:
 # ---- 리포트 ---------------------------------------------------------------------
 
 def report_md(tracking: dict[str, dict], stats: dict) -> str:
-    rows = list(tracking.values())
+    """마감일이 지난 공고만 분석한다. 마감 전 공고는 집계·표에서 모두 제외."""
+    now = kst_now()
+    rows = [r for r in tracking.values() if is_closed(r, now)]
+    upcoming = len(tracking) - len(rows)
     awarded = [r for r in rows if r.get("상태") == "낙찰"]
     waiting = [r for r in rows if r.get("상태") in ("대기", "결과대기")]
-    lines = ["## 낙찰 결과 (추적 공고)", ""]
+    gave_up = [r for r in rows if r.get("상태") == "확인불가"]
+    lines = ["## 낙찰 결과 (마감 지난 추적 공고)", ""]
     if stats.get("오류"):
         lines += [f"> ⚠️ 낙찰정보 조회 중 오류로 일부만 확인했습니다: {stats['오류']}", ""]
-    lines += [f"추적 중 {len(rows)}건 · 낙찰 확정 누적 {len(awarded)}건 · 결과 대기 {len(waiting)}건", ""]
+    lines += [f"마감 지난 공고 **{len(rows)}건** 기준 · 낙찰 확정 {len(awarded)}건 · "
+              f"결과 대기 {len(waiting)}건 · 확인불가 {len(gave_up)}건 "
+              f"(마감 전 {upcoming}건은 분석 제외)", ""]
 
     new = sorted(stats.get("신규낙찰", []), key=lambda r: -to_float(r.get("예산(억원)")))
     lines += [f"### 이번에 확정된 낙찰 ({len(new)}건)", ""]
@@ -248,6 +264,17 @@ def report_md(tracking: dict[str, dict], stats: dict) -> str:
     else:
         lines.append("이번 조회에서 새로 확정된 낙찰은 없습니다.")
     lines.append("")
+
+    if waiting:
+        lines += [f"### 결과 대기 ({len(waiting)}건, 마감 경과일순)", "",
+                  "| 공고명 | 수요기관 | 등급 | 예산(억원) | 마감 | 경과 |",
+                  "|---|---|---|---:|---|---:|"]
+        for r in sorted(waiting, key=lambda r: close_of(r, now)):
+            name = f"[{r['공고명'].strip()}]({r['링크']})" if r.get("링크") else r["공고명"].strip()
+            days = (now - close_of(r, now)).days
+            lines.append(f"| {name} | {r['수요기관']} | {r['등급']} | "
+                         f"{r.get('예산(억원)') or '-'} | {(r.get('마감일시') or '-')[:10]} | {days}일 |")
+        lines.append("")
 
     if awarded:
         tally: dict[str, list] = {}
@@ -268,6 +295,7 @@ def report_md(tracking: dict[str, dict], stats: dict) -> str:
 
     lines += ["- 예산대비 = 낙찰금액 ÷ 공고 예산. 협상계약은 기술평가 후 가격협상으로 정해져 "
               "100%에 가까울 수 있습니다.",
+              "- 입찰 마감일이 지난 공고만 분석합니다. 마감 전 공고는 추적 목록에만 있고 이 섹션에는 나오지 않습니다.",
               f"- 마감 후 {WAIT_AFTER_CLOSE_DAYS}일부터 조회하고, {GIVE_UP_DAYS}일이 지나도 "
               "결과가 없으면(유찰·취소 등) '확인불가'로 둡니다.", ""]
     return "\n".join(lines)
@@ -312,7 +340,7 @@ def main() -> int:
     if a.append_to and Path(a.append_to).exists():
         target = Path(a.append_to)
         text = target.read_text(encoding="utf-8")
-        if "## 낙찰 결과 (추적 공고)" not in text:
+        if "## 낙찰 결과 (" not in text:
             target.write_text(text.rstrip("\n") + "\n\n" + md, encoding="utf-8")
 
     print(json.dumps({"tracked": len(tracking), "added": added, "queried": stats["조회"],
