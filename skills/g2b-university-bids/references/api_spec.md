@@ -33,6 +33,28 @@
 | cntrctCnclsMthdNm | 계약방법 (협상에 의한 계약 = 제안서 평가형) |
 | bidNtceDtlUrl | 나라장터 공고 상세 링크 |
 
+## 낙찰정보서비스 (낙찰 결과 추적)
+
+- 데이터셋: 조달청_나라장터 낙찰정보서비스 (공공데이터포털 15129397). 입찰공고와 같은 키를 쓰지만 **별도 활용신청** 필요
+- 서비스: `ScsbidInfoService`
+- 사용 오퍼레이션: `getScsbidListSttusServc` (낙찰된 목록 현황 용역조회)
+- 요청 URL: `https://apis.data.go.kr/1230000/as/ScsbidInfoService/getScsbidListSttusServc`
+
+| 파라미터 | 설명 | 이 스킬의 값 |
+|---|---|---|
+| inqryDiv | 조회구분. 4 = 입찰공고번호 기준 | 4 |
+| bidNtceNo | 입찰공고번호 (차수 제외) | R26BK01801922 |
+| inqryBgnDt / inqryEndDt | 기간. 공고번호 조회에선 생략, 오류 시 최근 200일로 재시도 | |
+
+| 응답 필드 | 의미 |
+|---|---|
+| bidwinnrNm | 최종낙찰업체명 (비어 있으면 미확정·유찰) |
+| sucsfbidAmt / sucsfbidRate | 최종낙찰금액 / 낙찰률(%) |
+| prtcptCnum | 참가업체 수 |
+| rlOpengDt / fnlSucsfDate | 실개찰일시 / 최종낙찰일자 |
+
+참고로 같은 서비스의 `getOpengResultListInfoServcPPSSrch`(개찰결과)에는 `opengCorpInfo`(1순위 업체 요약)가 있다. 전체 투찰자 명단은 공식 API로 제공되지 않는다.
+
 ## 자주 나는 오류
 
 | 코드 | 원인 | 조치 |
