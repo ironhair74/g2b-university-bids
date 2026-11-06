@@ -1,0 +1,57 @@
+name: 기관별 과거 발주 이력 조회
+
+on:
+  workflow_dispatch:
+    inputs:
+      institution:
+        description: "기관명 (수요기관명 부분일치, 예: 경희대)"
+        required: true
+      days:
+        description: "최근 N일 (예: 365)"
+        required: true
+        default: "365"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-brief          # 데일리 브리프와 동시에 커밋하지 않도록
+  cancel-in-progress: false
+
+jobs:
+  history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 이력 조회 (마감 공고 포함)
+        env:
+          G2B_SERVICE_KEY: ${{ secrets.G2B_SERVICE_KEY }}
+        run: |
+          python skills/g2b-university-bids/scripts/search_bids.py \
+            --institution "${{ github.event.inputs.institution }}" \
+            --days "${{ github.event.inputs.days }}" \
+            --include-closed --out reports/history
+
+      - name: 실행 요약에 표시
+        if: always()
+        run: |
+          f=$(ls -t reports/history/history_*.md 2>/dev/null | head -1)
+          [ -n "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || echo "결과 없음" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 결과 커밋
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/history
+          if git diff --cached --quiet; then
+            echo "변경 없음"
+          else
+            git commit -m "이력 조회: ${{ github.event.inputs.institution }} 최근 ${{ github.event.inputs.days }}일"
+            git pull --rebase -q
+            git push
+          fi

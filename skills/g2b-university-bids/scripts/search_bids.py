@@ -407,7 +407,13 @@ def main() -> int:
                    help="1MM 단가(원), 기본 35,000,000")
     p.add_argument("--sample", help="API 대신 저장된 JSON 응답 파일로 실행")
     p.add_argument("--out", default="output", help="결과 폴더")
+    p.add_argument("--institution",
+                   help="특정 기관만 조회 (수요기관명 부분일치, 예: 경희대). 과거 이력 조회용")
     a = p.parse_args()
+
+    global INSTITUTION_TERMS
+    if a.institution:
+        INSTITUTION_TERMS = [a.institution.strip()]
 
     if a.sample:
         items, _ = extract_items(json.loads(Path(a.sample).read_text(encoding="utf-8")))
@@ -423,7 +429,8 @@ def main() -> int:
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     stamp = kst_now().strftime("%Y%m%d")
-    csv_p, md_p = out / f"univ_bids_{stamp}.csv", out / f"univ_bids_{stamp}.md"
+    prefix = f"history_{a.institution.strip()}_{a.days}d" if a.institution else "univ_bids"
+    csv_p, md_p = out / f"{prefix}_{stamp}.csv", out / f"{prefix}_{stamp}.md"
     write_csv(rows, csv_p)
     write_md(rows, md_p, a.days, len(items))
 

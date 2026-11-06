@@ -112,6 +112,13 @@ python search_bids.py --sample ../../../examples/sample_response.json   # 키 �
 
 네이버 메일은 **환경설정 → POP3/IMAP 설정 → POP3/SMTP 사용: 사용함**으로 켜 두어야 발송됩니다.
 
+## 기관별 과거 발주 이력
+
+특정 대학이 지난 1년간 어떤 용역을 냈는지 볼 때 씁니다.
+- GitHub: **Actions → 기관별 과거 발주 이력 조회 → Run workflow**에서 기관명(예: `경희대`)과 기간(예: `365`)을 입력합니다. 결과는 `reports/history/`에 저장됩니다.
+- 직접 실행: `python search_bids.py --institution 경희대 --days 365 --include-closed`
+- 마감된 공고도 포함하며, 같은 A/B/C 등급과 AX·DX 분류를 적용합니다.
+
 ## 낙찰 결과 추적
 
 `track_awards.py`가 브리프의 A·B등급과 AX 전략·진단 공고를 [`reports/award_tracking.csv`](reports/award_tracking.csv)에 쌓습니다. 이 작업은 매일 자동으로 이루어집니다. **매주 월요일 브리프 메일**에는 마감이 지난 공고의 낙찰 결과가 함께 들어갑니다.
