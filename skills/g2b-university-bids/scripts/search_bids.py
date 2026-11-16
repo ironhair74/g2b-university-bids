@@ -33,7 +33,7 @@ ENDPOINT = (
     "http://apis.data.go.kr/1230000/ad/BidPublicInfoService/"
     "getBidPblancListInfoServcPPSSrch"
 )
-CHUNK_DAYS = 7          # API 조회기간 제한을 피하려고 7일 단위로 나눠 호출
+CHUNK_DAYS = 3          # API는 조회구간이 7일 이상이면 오류 없이 0건을 준다(2026-11-16 확인, 6일까지 정상). 여유를 두고 3일 단위로 호출
 PAGE_SIZE = 100
 MAX_PAGES_PER_CHUNK = 20
 UNIT_PRICE_PER_MM = 35_000_000   # 1MM 평균단가 (기본값, --unit-price로 변경)
