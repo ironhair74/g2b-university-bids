@@ -54,9 +54,12 @@ HIGH_REGEX = {
 }
 MID = ["연구", "학술", "기획", "분석", "진단", "개선방안", "정보화", "플랫폼", "데이터",
        "스마트캠퍼스", "AX", "AI", "DX", "인공지능", "디지털전환", "혁신", "글로컬",
-       "RISE", "라이즈", "앵커", "조사"]
+       "RISE", "라이즈", "앵커", "조사", "만족도", "실태조사", "방안"]
 # 시스템 구축(SI)형: 핵심 키워드가 없을 때만 감점
-SI = ["시스템구축", "구축용역", "고도화", "솔루션", "개발용역"]
+SI = ["시스템구축", "구축용역", "고도화", "솔루션", "개발용역", "구축사업"]
+# 이 둘은 핵심 키워드가 있어도 감점한다 ('성과관리 시스템 구축'이 A로 오르는 것을 막음).
+# '구축용역'은 넣지 않는다: '자문체계 구축 용역'처럼 컨설팅성 공고가 많다
+SI_STRONG = ["시스템구축", "구축사업"]
 EXCLUDE = ["청소", "경비", "미화", "시설관리", "급식", "식당", "공사", "감리", "수선",
            "보수", "유지관리", "유지보수", "구매", "임차", "렌탈", "인쇄", "운송",
            "방역", "소독", "폐기물", "조경", "전기안전", "승강기", "냉난방", "버스", "운행",
@@ -65,8 +68,15 @@ EXCLUDE = ["청소", "경비", "미화", "시설관리", "급식", "식당", "�
            "벤치마킹", "캠프", "경진대회", "공모전", "챌린지", "해커톤", "메이커톤", "세탁",
            "린넨", "위탁검사", "검진", "콜센터", "채용", "회계감사", "결산", "정산", "특허",
            "촬영", "영상", "콘텐츠", "프로그램운영", "교육운영", "운영지원", "위탁운영",
-           "운영위탁", "합성", "시험법", "부품", "조립", "프로토타입", "인허가", "시설검사",
-           "안전점검", "숙식", "환경조성", "실습실"]
+           "운영위탁", "시험법", "부품", "조립", "프로토타입", "인허가", "시설검사",
+           "안전점검", "숙식", "환경조성", "실습실",
+           # 2026-11-16 보정: 표기 변형·운영대행·시설 진단·설계
+           "컨텐츠", "라벨링", "솔버톤", "현장실습", "직무실습", "체험", "포럼", "안전진단",
+           "건강진단", "가구", "설계공모"]
+# 부분 문자열로 오매칭되는 제외어는 정규식으로 본다
+EXCLUDE_REGEX = {
+    "합성": r"(?<!통)합성",     # '통합성과관리'의 '합성'은 제외하지 않음
+}
 # ---- AX·DX 공고 (점수·등급과 별도로 모아 보여줌) --------------------------
 AX_TERMS = ["AX", "AI", "DX", "인공지능", "디지털전환", "생성형", "LLM", "에이전트",
             "Agent", "에듀테크", "LXP", "LMS", "빅데이터", "데이터레이크", "DataLake",
@@ -84,7 +94,7 @@ AX_TYPES = [   # 위에서부터 먼저 맞는 유형 하나로 분류
 SHORT_EN = {"ISP", "ISMP", "BPR", "AX", "AI", "DX", "RISE", "LLM", "LXP", "LMS", "AID"}
 HEALTH_HINT = ["병원", "의료원", "보건"]
 # '과학기술원' 검색에 함께 잡히지만 대학이 아닌 기관
-NON_UNIV = ["한국해양과학기술원"]
+NON_UNIV = ["한국해양과학기술원", "대학경기대회"]   # 대학경기대회 조직위(재단법인)
 
 
 def kst_now() -> datetime:
@@ -202,6 +212,12 @@ def has(word: str, title: str, title_ns: str) -> bool:
     return word in title_ns
 
 
+def excluded(ns_x: str) -> list[str]:
+    """제외어 목록. ns_x 는 띄어쓰기를 지우고 '운영체계'를 '체계'로 바꾼 공고명."""
+    return ([k for k in EXCLUDE if k in ns_x]
+            + [k for k, rx in EXCLUDE_REGEX.items() if re.search(rx, ns_x)])
+
+
 def score(item: dict) -> tuple[int, list[str], str]:
     title = item.get("bidNtceNm", "")
     ns = re.sub(r"\s+", "", title)
@@ -209,14 +225,16 @@ def score(item: dict) -> tuple[int, list[str], str]:
     hits_h += [k for k, rx in HIGH_REGEX.items() if re.search(rx, ns)]
     hits_m = [k for k in MID if has(k, title, ns)]
     ns_x = ns.replace("운영체계", "체계")   # '프로그램 운영 체계 구축'은 운영대행이 아님
-    hits_x = [k for k in EXCLUDE if k in ns_x]
-    hits_si = [] if hits_h else [k for k in SI if k in ns]
+    hits_x = excluded(ns_x)
+    hits_si = ([k for k in SI_STRONG if k in ns] if hits_h
+               else [k for k in SI if k in ns])
     s = 3 * len(hits_h) + len(hits_m) - 5 * len(hits_x) - 2 * len(hits_si)
     budget = budget_of(item)
-    if budget >= 300_000_000:
-        s += 2
-    elif budget >= 100_000_000:
-        s += 1
+    if hits_h:   # 예산 가점은 핵심 키워드가 있을 때만 (큰 시설·구축 공고가 예산만으로 오르는 것 방지)
+        if budget >= 300_000_000:
+            s += 2
+        elif budget >= 100_000_000:
+            s += 1
     names = f"{item.get('dminsttNm','')} {item.get('ntceInsttNm','')}"
     track = "의료(대학병원)" if any(h in names for h in HEALTH_HINT) else (
         "국립대" if ("국립" in names or "서울대" in names or "과학기술원" in names) else "대학")
@@ -236,7 +254,7 @@ def ax_type(item: dict) -> str:
     if not any(has(t, title, ns) for t in AX_TERMS):
         return ""
     ns_x = ns.replace("운영체계", "체계")
-    if any(k in ns_x for k in EXCLUDE):
+    if excluded(ns_x):
         return ""
     for label, words in AX_TYPES:   # 같은 라벨이 두 번 나오면 강한 신호가 먼저
         if any(has(w, title, ns) for w in words):
