@@ -41,6 +41,7 @@ TRACK_AX_TYPES = {"전략·진단"}
 WAIT_AFTER_CLOSE_DAYS = 3     # 마감 후 이 기간은 개찰·평가 중이므로 조회하지 않음
 GIVE_UP_DAYS = 120            # 마감 후 이 기간이 지나도 결과가 없으면 '확인불가'
 MAX_CALLS = 200               # 1회 실행당 API 호출 상한 (일일 트래픽 보호)
+TIME_BUDGET_SEC = 8 * 60      # 1회 실행당 조회 시간 상한 (워크플로 시간 초과 방지)
 
 FIELDS = ["공고번호", "공고명", "수요기관", "등급", "구분", "예산(억원)", "마감일시",
           "상태", "낙찰업체", "낙찰금액(억원)", "낙찰률(%)", "예산대비(%)",
@@ -112,6 +113,10 @@ def ingest_briefs(reports: Path, tracking: dict[str, dict]) -> int:
 
 # ---- API ----------------------------------------------------------------------
 
+class AuthError(RuntimeError):
+    """키·권한 문제: 나머지 조회도 모두 실패하므로 즉시 중단."""
+
+
 def call_api(key: str, bid_no: str, with_dates: bool) -> list[dict]:
     params = {"serviceKey": key, "pageNo": 1, "numOfRows": 50, "type": "json",
               "inqryDiv": "4", "bidNtceNo": bid_no}
@@ -121,22 +126,42 @@ def call_api(key: str, bid_no: str, with_dates: bool) -> list[dict]:
         params["inqryEndDt"] = end.strftime("%Y%m%d2359")
     url = ENDPOINT + "?" + urllib.parse.urlencode(params, safe="")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 g2b-university-bids"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            raw = r.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")[:300]
-        hint = ""
-        if e.code in (401, 403):
-            hint = (" → 공공데이터포털에서 '조달청_나라장터 낙찰정보서비스' 활용신청이 "
-                    "승인됐는지 확인하세요.")
-        raise RuntimeError(f"낙찰정보 API HTTP {e.code}: {body or e.reason}{hint}")
+    raw = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as e:
+            raise _http_error(e)
+        except Exception as e:        # 시간 초과·연결 끊김 등 일시 오류 → 재시도
+            if attempt == 2:
+                raise RuntimeError(f"낙찰정보 API 일시 오류({type(e).__name__}): {e}")
+            time.sleep(3 * (attempt + 1))
+    return _parse(raw)
+
+
+def _http_error(e: "urllib.error.HTTPError") -> RuntimeError:
+    body = e.read().decode("utf-8", errors="replace")[:300]
+    hint = ""
+    if e.code in (401, 403):
+        hint = (" → 공공데이터포털에서 '조달청_나라장터 낙찰정보서비스' 활용신청이 "
+                "승인됐는지 확인하세요.")
+    return AuthError(f"낙찰정보 API HTTP {e.code}: {body or e.reason}{hint}") \
+            if e.code in (401, 403) else RuntimeError(f"낙찰정보 API HTTP {e.code}: {body or e.reason}")
+
+
+def _parse(raw: str) -> list[dict]:
     if raw.lstrip().startswith("<"):
         code = re.search(r"<returnReasonCode>(\d+)", raw)
         msg = re.search(r"<returnAuthMsg>([^<]+)", raw)
-        raise RuntimeError(f"낙찰정보 API 오류 {code.group(1) if code else '?'}: "
-                           f"{msg.group(1) if msg else raw[:200]}")
-    payload = json.loads(raw)
+        c = code.group(1) if code else "?"
+        err = AuthError if c in ("20", "30", "31", "32") else RuntimeError
+        raise err(f"낙찰정보 API 오류 {c}: {msg.group(1) if msg else raw[:200]}")
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        raise RuntimeError(f"낙찰정보 API 응답 해석 실패: {raw[:150]}")
     header = payload.get("response", {}).get("header", {})
     code = str(header.get("resultCode", "00"))
     if code == "03":
@@ -154,8 +179,10 @@ def call_api(key: str, bid_no: str, with_dates: bool) -> list[dict]:
 def lookup(key: str, bid_no: str) -> list[dict]:
     try:
         return call_api(key, bid_no, with_dates=False)
+    except AuthError:
+        raise
     except RuntimeError as e:
-        if "HTTP 4" in str(e) and ("401" in str(e) or "403" in str(e)):
+        if "일시 오류" in str(e):
             raise
         return call_api(key, bid_no, with_dates=True)
 
@@ -203,8 +230,13 @@ def is_closed(row: dict, now: datetime) -> bool:
 def refresh(tracking: dict[str, dict], key: str, fetch=lookup) -> dict:
     now = kst_now()
     today = now.strftime("%Y-%m-%d")
-    stats = {"조회": 0, "신규낙찰": [], "확인불가": 0, "오류": None}
-    for row in tracking.values():
+    stats = {"조회": 0, "신규낙찰": [], "확인불가": 0, "오류": None, "실패": 0}
+    started = time.monotonic()
+    streak = 0
+    # 중요한 공고부터: A등급 → 마감이 오래된 순
+    order = sorted(tracking.values(),
+                   key=lambda r: (r.get("등급") != "A", close_of(r, now)))
+    for row in order:
         if row.get("상태") not in ("대기", "결과대기"):
             continue
         close = close_of(row, now)
@@ -214,13 +246,22 @@ def refresh(tracking: dict[str, dict], key: str, fetch=lookup) -> dict:
             row["상태"] = "확인불가"
             stats["확인불가"] += 1
             continue
-        if stats["조회"] >= MAX_CALLS:
+        if stats["조회"] >= MAX_CALLS or time.monotonic() - started > TIME_BUDGET_SEC:
+            stats["오류"] = stats["오류"] or "조회 상한(건수·시간)에 도달해 일부는 다음 실행으로 넘깁니다."
             break
         try:
             items = fetch(key, row["공고번호"])
-        except RuntimeError as e:
+        except AuthError as e:
             stats["오류"] = str(e)
             break      # 키·권한 문제면 나머지도 같으므로 중단
+        except RuntimeError as e:
+            stats["실패"] += 1
+            stats["오류"] = f"{stats['실패']}건 조회 실패(다음 실행 때 재시도): {e}"
+            streak += 1
+            if streak >= 5:        # 연속 실패면 서버 장애로 보고 중단
+                break
+            continue
+        streak = 0
         stats["조회"] += 1
         award = pick_award(items)
         if award:
@@ -301,6 +342,23 @@ def report_md(tracking: dict[str, dict], stats: dict) -> str:
     return "\n".join(lines)
 
 
+def _run(a, tracking, stats):
+    if a.ingest_only:
+        return stats
+    if a.mock:
+        data = json.loads(Path(a.mock).read_text(encoding="utf-8"))
+        def fetch(_k, no):
+            v = data.get(no)
+            if isinstance(v, str):
+                raise (AuthError if v.startswith("AUTH") else RuntimeError)(v)
+            return v or []
+        return refresh(tracking, "mock", fetch)
+    key = (os.environ.get("G2B_SERVICE_KEY") or "").strip().strip('"')
+    if not key:
+        raise RuntimeError("G2B_SERVICE_KEY 환경변수가 없습니다.")
+    return refresh(tracking, key)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="추적 공고 낙찰 결과 조회")
     p.add_argument("--reports", default="reports", help="브리프가 쌓이는 폴더")
@@ -315,22 +373,11 @@ def main() -> int:
     tracking = load_tracking(track_path)
     added = ingest_briefs(reports, tracking)
 
-    stats = {"조회": 0, "신규낙찰": [], "확인불가": 0, "오류": None}
-    if not a.ingest_only:
-        if a.mock:
-            data = json.loads(Path(a.mock).read_text(encoding="utf-8"))
-            def fetch(_k, no):
-                v = data.get(no)
-                if isinstance(v, str):
-                    raise RuntimeError(v)
-                return v or []
-            stats = refresh(tracking, "mock", fetch)
-        else:
-            key = (os.environ.get("G2B_SERVICE_KEY") or "").strip().strip('"')
-            if not key:
-                print("❌ G2B_SERVICE_KEY 환경변수가 없습니다.", file=sys.stderr)
-                return 2
-            stats = refresh(tracking, key)
+    stats = {"조회": 0, "신규낙찰": [], "확인불가": 0, "오류": None, "실패": 0}
+    try:
+        stats = _run(a, tracking, stats)
+    except Exception as e:          # 예상 못한 오류에도 추적표·리포트는 남긴다
+        stats["오류"] = f"예상치 못한 오류: {type(e).__name__}: {e}"
 
     save_tracking(track_path, tracking)
     md = report_md(tracking, stats)
@@ -346,7 +393,7 @@ def main() -> int:
     print(json.dumps({"tracked": len(tracking), "added": added, "queried": stats["조회"],
                       "new_awards": len(stats["신규낙찰"]), "error": stats["오류"]},
                      ensure_ascii=False))
-    return 1 if stats["오류"] and stats["조회"] == 0 else 0
+    return 1 if stats["오류"] and stats["조회"] == 0 and not a.ingest_only else 0
 
 
 if __name__ == "__main__":
