@@ -364,6 +364,8 @@ def main() -> int:
     p.add_argument("--reports", default="reports", help="브리프가 쌓이는 폴더")
     p.add_argument("--append-to", help="결과 섹션을 붙일 브리프 .md")
     p.add_argument("--ingest-only", action="store_true", help="추적 목록만 갱신, API 조회 안 함")
+    p.add_argument("--only-if-new", action="store_true",
+                   help="새로 확정된 낙찰이 있을 때만 리포트 작성·브리프에 첨부 (평일 실행용)")
     p.add_argument("--mock", help="테스트용: {공고번호: [item,...]} JSON 파일")
     a = p.parse_args()
 
@@ -380,6 +382,10 @@ def main() -> int:
         stats["오류"] = f"예상치 못한 오류: {type(e).__name__}: {e}"
 
     save_tracking(track_path, tracking)
+    if a.only_if_new and not stats["신규낙찰"] and not stats["오류"]:
+        print(json.dumps({"tracked": len(tracking), "added": added, "queried": stats["조회"],
+                          "new_awards": 0, "error": None}, ensure_ascii=False))
+        return 0
     md = report_md(tracking, stats)
     stamp = kst_now().strftime("%Y%m%d")
     (reports / f"awards_{stamp}.md").write_text(

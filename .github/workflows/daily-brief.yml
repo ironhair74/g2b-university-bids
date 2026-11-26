@@ -11,7 +11,7 @@ on:
         required: false
         default: ""
       awards:
-        description: "낙찰 결과도 조회 (평소엔 월요일만)"
+        description: "낙찰 주간 섹션 강제 첨부 (조회 자체는 매일 실행)"
         type: boolean
         required: false
         default: false
@@ -57,8 +57,9 @@ jobs:
             --days "${{ steps.period.outputs.days }}" --out reports
 
       - name: 낙찰 결과 추적
-        # 매일: 브리프의 A·B등급 공고를 추적 목록에 추가
-        # 월요일(또는 수동 실행 시 awards 체크): 마감 지난 공고의 낙찰 결과 조회 → 브리프에 섹션 추가
+        # 매일: 추적 목록 갱신 + 마감 지난 공고 낙찰 조회
+        # 월요일(또는 수동 awards 체크): 주간 낙찰 섹션을 항상 브리프에 첨부
+        # 그 밖의 평일: 새로 확정된 낙찰이 있을 때만 첨부
         continue-on-error: true
         env:
           G2B_SERVICE_KEY: ${{ secrets.G2B_SERVICE_KEY }}
@@ -67,8 +68,7 @@ jobs:
           if [ "$(TZ=Asia/Seoul date +%u)" = "1" ] || [ "${{ github.event.inputs.awards }}" = "true" ]; then
             python skills/g2b-university-bids/scripts/track_awards.py --reports reports --append-to "$brief"
           else
-            python skills/g2b-university-bids/scripts/track_awards.py --reports reports --ingest-only
-            rm -f reports/awards_$(TZ=Asia/Seoul date +%Y%m%d).md
+            python skills/g2b-university-bids/scripts/track_awards.py --reports reports --append-to "$brief" --only-if-new
           fi
 
       - name: 실행 요약에 브리프 표시
